@@ -34,15 +34,16 @@ class Task:
 
     def complete(self):
         """Mark this task as done."""
-        pass
+        self.is_completed = True
 
     def reschedule(self, new_time: str):
         """Move this task to a new time slot."""
-        pass
+        self.scheduled_time = new_time
 
     def get_priority_label(self) -> str:
         """Return a human-readable priority string (e.g. 'High')."""
-        pass
+        labels = {1: "Low", 2: "Low-Medium", 3: "Medium", 4: "High", 5: "Critical"}
+        return labels.get(self.priority, "Unknown")
 
 
 @dataclass
@@ -56,35 +57,43 @@ class Pet:
 
     def add_task(self, task: Task):
         """Add a care task to this pet's task list."""
-        pass
+        self.tasks.append(task)
 
     def remove_task(self, task_name: str):
         """Remove a task by name."""
-        pass
+        self.tasks = [t for t in self.tasks if t.name != task_name]
 
     def get_tasks(self) -> list[Task]:
         """Return all tasks for this pet."""
-        pass
+        return self.tasks
 
     def get_tasks_by_priority(self) -> list[Task]:
         """Return tasks sorted highest priority first."""
-        pass
+        return sorted(self.tasks, key=lambda t: t.priority, reverse=True)
 
     def get_pending_tasks(self) -> list[Task]:
         """Return only incomplete tasks."""
-        pass
+        return [t for t in self.tasks if not t.is_completed]
 
     def go_on_walk(self, duration_minutes: int = 30) -> Task:
         """Create a WALK task, add it to this pet, and return it."""
-        pass
+        walk = Task(
+            name=f"{self.name}'s Walk",
+            task_type=TaskType.WALK,
+            duration_minutes=duration_minutes,
+            priority=4,
+            preferred_time="morning",
+        )
+        self.add_task(walk)
+        return walk
 
     def add_medical_condition(self, condition: str):
         """Record a medical condition that may affect scheduling."""
-        pass
+        self.medical_conditions.append(condition)
 
     def clear_completed_tasks(self):
         """Remove all tasks marked as completed from this pet's task list."""
-        pass
+        self.tasks = [t for t in self.tasks if not t.is_completed]
 
 
 @dataclass
@@ -117,28 +126,40 @@ class Owner:
 
     def add_pet(self, pet: Pet):
         """Register a pet under this owner."""
-        pass
+        self.pets.append(pet)
 
     def remove_pet(self, pet_name: str):
         """Remove a pet by name."""
-        pass
+        self.pets = [p for p in self.pets if p.name != pet_name]
 
     def set_available_time(self, minutes: int):
         """Update how many minutes per day are available for pet care."""
-        pass
+        self.available_minutes_per_day = minutes
 
     def set_preference(self, key: str, value):
         """Store an owner preference (e.g. set_preference('walk_time', 'morning'))."""
-        pass
+        self.preferences[key] = value
 
     def get_schedule(self) -> list[ScheduledTask]:
         """Generate and return today's schedule via the Scheduler."""
-        pass
+        if self._scheduler is None:
+            self._scheduler = Scheduler(self)
+        return self._scheduler.generate_daily_plan()
 
     def add_event_to_schedule(self, task: Task, pet: Pet):
-        """Add a one-off task to a pet and regenerate the schedule.
-        Creates the Scheduler if it doesn't exist yet."""
-        pass
+        """Add a one-off task to a pet and regenerate the schedule, creating the Scheduler if needed."""
+        pet.add_task(task)
+        if self._scheduler is None:
+            self._scheduler = Scheduler(self)
+        self._scheduler.generate_daily_plan()
+
+    def get_all_tasks(self) -> list[tuple[Task, Pet]]:
+        """Return every task across all pets as (task, pet) pairs."""
+        return [(task, pet) for pet in self.pets for task in pet.tasks]
+
+    def get_all_pending_tasks(self) -> list[tuple[Task, Pet]]:
+        """Return every incomplete task across all pets as (task, pet) pairs."""
+        return [(task, pet) for pet in self.pets for task in pet.get_pending_tasks()]
 
 
 class Scheduler:
@@ -157,39 +178,126 @@ class Scheduler:
                       "17:00", "18:00", "19:00", "20:00"],
     }
 
+    # Bump priority by this amount when a pet has medical conditions
+    MEDICAL_PRIORITY_BOOST = 1
+
     def __init__(self, owner: Owner):
         self.owner = owner
         self.daily_plan: list[ScheduledTask] = []
         self.total_scheduled_minutes: int = 0
 
     def generate_daily_plan(self) -> list[ScheduledTask]:
-        """
-        Build a daily schedule for all of the owner's pets.
-        Sort tasks by priority, slot them into available time windows,
-        and return a time-ordered list of ScheduledTasks.
-        """
-        pass
+        """Collect all pending tasks, sort by priority, slot into free time windows, and return a time-ordered schedule."""
+        self.reset_plan()
+        used_slots: set[str] = set()
+
+        # Gather all pending (task, pet) pairs
+        all_tasks: list[tuple[Task, Pet]] = self.owner.get_all_pending_tasks()
+
+        # Apply medical boost before sorting
+        for task, pet in all_tasks:
+            if pet.medical_conditions and task.task_type == TaskType.MEDICATION:
+                task.priority = min(5, task.priority + self.MEDICAL_PRIORITY_BOOST)
+
+        # Sort by priority descending so critical tasks are scheduled first
+        prioritized = self._prioritize_tasks(all_tasks)
+
+        for task, pet in prioritized:
+            if not self._check_time_constraints(task):
+                continue  # not enough time left today — skip
+
+            slot = self._find_slot(task, used_slots)
+            if slot is None:
+                continue  # no free slot available — skip
+
+            used_slots.add(slot)
+            task.scheduled_time = slot
+            reason = self._build_reason(task, pet)
+            self.daily_plan.append(ScheduledTask(task, slot, pet, reason))
+            self.total_scheduled_minutes += task.duration_minutes
+
+        # Return plan in chronological order
+        self.daily_plan.sort(key=lambda st: st.scheduled_time)
+        return self.daily_plan
 
     def explain_plan(self) -> str:
         """Return a human-readable summary of the daily plan with reasoning."""
-        pass
+        if not self.daily_plan:
+            return "No schedule generated yet. Call generate_daily_plan() first."
+
+        lines = [
+            f"Daily plan for {self.owner.name}",
+            f"Time budget: {self.total_scheduled_minutes} / "
+            f"{self.owner.available_minutes_per_day} min used\n",
+        ]
+        for st in self.daily_plan:
+            lines.append(
+                f"  {st.scheduled_time}  [{st.pet_name}]  {st.task.name}"
+                f"  ({st.task.duration_minutes} min, {st.task.get_priority_label()} priority)"
+                f"\n           Reason: {st.reason}"
+            )
+        return "\n".join(lines)
+
+    # ── private helpers ──────────────────────────────────────────────────────
 
     def _find_slot(self, task: Task, used_slots: set[str]) -> str | None:
-        """Return the earliest free slot that matches the task's preferred time."""
-        pass
+        """Return the earliest free slot matching the task's preferred time, falling back to any open slot."""
+        # Owner preference overrides task preference for walks
+        if task.task_type == TaskType.WALK and "walk_time" in self.owner.preferences:
+            preferred = self.owner.preferences["walk_time"]
+        else:
+            preferred = task.preferred_time
 
-    def _build_reason(self, task: Task) -> str:
+        candidate_slots = self.TIME_OF_DAY_MAP.get(preferred, self.TIME_SLOTS)
+
+        for slot in candidate_slots:
+            if slot not in used_slots:
+                return slot
+
+        # Fall back to any free slot across the whole day
+        for slot in self.TIME_SLOTS:
+            if slot not in used_slots:
+                return slot
+
+        return None  # every slot is taken
+
+    def _build_reason(self, task: Task, pet: Pet) -> str:
         """Construct a short explanation for why a task was scheduled when it was."""
-        pass
+        reasons = []
 
-    def _prioritize_tasks(self, tasks: list[tuple[Task, Pet]]) -> list[tuple[Task, Pet]]:
-        """Sort (task, pet) pairs by priority descending."""
-        pass
+        if task.priority == 5:
+            reasons.append("critical priority — must not be skipped")
+        elif task.priority == 4:
+            reasons.append("high priority")
+
+        if task.task_type == TaskType.MEDICATION:
+            reasons.append("medication task")
+            if pet.medical_conditions:
+                reasons.append(f"pet has condition(s): {', '.join(pet.medical_conditions)}")
+
+        if task.preferred_time != "anytime":
+            reasons.append(f"preferred {task.preferred_time} window")
+
+        if task.frequency == "daily":
+            reasons.append("recurring daily task")
+
+        if not reasons:
+            reasons.append("fits within available time budget")
+
+        return "; ".join(reasons)
+
+    def _prioritize_tasks(
+        self, tasks: list[tuple[Task, Pet]]
+    ) -> list[tuple[Task, Pet]]:
+        """Sort (task, pet) pairs by priority descending, breaking ties by shortest duration first."""
+        return sorted(tasks, key=lambda tp: (-tp[0].priority, tp[0].duration_minutes))
 
     def _check_time_constraints(self, task: Task) -> bool:
         """Return True if adding this task still fits within the owner's available time."""
-        pass
+        return (self.total_scheduled_minutes + task.duration_minutes
+                <= self.owner.available_minutes_per_day)
 
     def reset_plan(self):
         """Clear the current daily plan and reset the scheduled minutes counter."""
-        pass
+        self.daily_plan = []
+        self.total_scheduled_minutes = 0
