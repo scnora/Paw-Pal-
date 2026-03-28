@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from enum import Enum
 
 
@@ -31,6 +32,7 @@ class Task:
     frequency: str = "daily"             # "daily" | "weekly" | "as-needed"
     is_completed: bool = False
     scheduled_time: str | None = None
+    due_date: date = field(default_factory=date.today)
 
     def complete(self):
         """Mark this task as done."""
@@ -44,6 +46,32 @@ class Task:
         """Return a human-readable priority string (e.g. 'High')."""
         labels = {1: "Low", 2: "Low-Medium", 3: "Medium", 4: "High", 5: "Critical"}
         return labels.get(self.priority, "Unknown")
+
+    def next_occurrence(self) -> "Task | None":
+        """Return a fresh copy of this task due on its next occurrence, or None if non-recurring.
+
+        Uses timedelta to calculate the next due_date: +1 day for "daily" tasks,
+        +7 days for "weekly" tasks. Returns None for "as-needed" tasks, which
+        do not auto-recur. The returned Task is a new instance with is_completed
+        reset to False and scheduled_time cleared.
+        """
+        if self.frequency == "daily":
+            next_due = self.due_date + timedelta(days=1)
+        elif self.frequency == "weekly":
+            next_due = self.due_date + timedelta(weeks=1)
+        else:
+            return None  # "as-needed" tasks do not auto-recur
+
+        return Task(
+            name=self.name,
+            task_type=self.task_type,
+            duration_minutes=self.duration_minutes,
+            priority=self.priority,
+            preferred_time=self.preferred_time,
+            notes=self.notes,
+            frequency=self.frequency,
+            due_date=next_due,
+        )
 
 
 @dataclass
@@ -238,28 +266,85 @@ class Scheduler:
             )
         return "\n".join(lines)
 
+    def mark_task_complete(self, scheduled_task: ScheduledTask) -> "Task | None":
+        """Mark a scheduled task done and queue the next occurrence for recurring tasks.
+
+        Calls task.complete(), then uses task.next_occurrence() to create a fresh
+        Task due tomorrow (daily) or in one week (weekly) and adds it back to the
+        pet so the next call to generate_daily_plan() picks it up automatically.
+        Returns the new Task if one was created, otherwise None.
+        """
+        scheduled_task.task.complete()
+        next_task = scheduled_task.task.next_occurrence()
+        if next_task is not None:
+            scheduled_task.pet.add_task(next_task)
+        return next_task
+
+    def detect_conflicts(self) -> list[str]:
+        """Scan the daily plan for tasks sharing the same time slot and return warning strings.
+
+        Groups every ScheduledTask by its scheduled_time. Any slot that contains
+        more than one task is a conflict. Returns a list of human-readable warning
+        strings (one per conflict slot) — never raises, never modifies the plan.
+        """
+        # Group tasks by time slot using a plain dict — no imports needed
+        slots: dict[str, list[ScheduledTask]] = {}
+        for st in self.daily_plan:
+            slots.setdefault(st.scheduled_time, []).append(st)
+
+        warnings = []
+        for time_slot, entries in sorted(slots.items()):
+            if len(entries) > 1:
+                names = " / ".join(
+                    f"{e.task.name} ({e.pet_name})" for e in entries
+                )
+                warnings.append(
+                    f"WARNING  {time_slot}  — {len(entries)} tasks overlap: {names}"
+                )
+        return warnings
+
+    def sort_by_time(self) -> list[ScheduledTask]:
+        """Return the daily plan sorted chronologically by scheduled time.
+
+        Uses a lambda key on task.scheduled_time, which is a zero-padded "HH:MM"
+        string — lexicographic order equals chronological order for this format.
+        Does not modify self.daily_plan; returns a new sorted list.
+        """
+        return sorted(self.daily_plan, key=lambda st: st.task.scheduled_time)
+
+    def filter_by_pet(self, pet_name: str) -> list[ScheduledTask]:
+        """Return only the scheduled tasks that belong to the named pet.
+
+        Filters self.daily_plan by comparing pet_name (case-sensitive) against
+        each ScheduledTask's pet_name property. Returns an empty list if no tasks
+        match — never raises. Does not modify the plan.
+        """
+        return [st for st in self.daily_plan if st.pet_name == pet_name]
+
+    def filter_by_completion(self, completed: bool) -> list[ScheduledTask]:
+        """Return scheduled tasks whose completion status matches the given flag.
+
+        Pass completed=True for tasks already marked done, or completed=False
+        for tasks still pending. Reads task.is_completed on the underlying Task.
+        Returns an empty list if none match — never raises. Does not modify the plan.
+        """
+        return [st for st in self.daily_plan if st.task.is_completed == completed]
+
     # ── private helpers ──────────────────────────────────────────────────────
 
     def _find_slot(self, task: Task, used_slots: set[str]) -> str | None:
         """Return the earliest free slot matching the task's preferred time, falling back to any open slot."""
-        # Owner preference overrides task preference for walks
-        if task.task_type == TaskType.WALK and "walk_time" in self.owner.preferences:
-            preferred = self.owner.preferences["walk_time"]
-        else:
-            preferred = task.preferred_time
-
-        candidate_slots = self.TIME_OF_DAY_MAP.get(preferred, self.TIME_SLOTS)
-
-        for slot in candidate_slots:
-            if slot not in used_slots:
-                return slot
-
-        # Fall back to any free slot across the whole day
-        for slot in self.TIME_SLOTS:
-            if slot not in used_slots:
-                return slot
-
-        return None  # every slot is taken
+        preferred = (
+            self.owner.preferences["walk_time"]
+            if task.task_type == TaskType.WALK and "walk_time" in self.owner.preferences
+            else task.preferred_time
+        )
+        # dict.fromkeys preserves insertion order while deduplicating:
+        # preferred slots come first, remaining TIME_SLOTS fill in the fallback.
+        candidates = dict.fromkeys(
+            self.TIME_OF_DAY_MAP.get(preferred, self.TIME_SLOTS) + self.TIME_SLOTS
+        )
+        return next((slot for slot in candidates if slot not in used_slots), None)
 
     def _build_reason(self, task: Task, pet: Pet) -> str:
         """Construct a short explanation for why a task was scheduled when it was."""

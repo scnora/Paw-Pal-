@@ -31,10 +31,15 @@ I did make some design changes during implementation. I changed the TIME_OF_DAY_
 - What constraints does your scheduler consider (for example: time, priority, preferences)?
 - How did you decide which constraints mattered most?
 
+My scheduler considers the owner’s available time, task priority, and preferred time of day. I prioritized these because they reflect how people actually plan pet tasks like feeding or medication need to happen first, and everything has to fit within the time the owner realistically has. I didn’t focus as much on exact timing precision since most pet tasks are flexible within a general time window.
+
+
 **b. Tradeoffs**
 
 - Describe one tradeoff your scheduler makes.
 - Why is that tradeoff reasonable for this scenario?
+
+One tradeoff my scheduler makes is that it only checks for conflicts at the time slot level instead of comparing actual task durations. For example, two tasks assigned “09:00” would conflict, but a 60-minute task at 09:00 and a 30-minute task at 09:30 wouldn’t be flagged. This is reasonable because pet care tasks are usually short and routine, so people think of them in broad time blocks rather than exact overlapping minutes, and this keeps the system simpler without hurting usability.
 
 ---
 
