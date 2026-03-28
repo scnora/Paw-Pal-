@@ -1,6 +1,12 @@
 # PawPal+ Project Reflection
 
 ## 1. System Design
+-- Sarai --
+//three core actions: add a pet, schedule event, did the pet eat, walk, meds, etc
+
+attributes: pet type, breed, age, name, 
+methods: go on walk, takemeds, addevent, getschedule
+
 
 **a. Initial design**
 
